@@ -14,7 +14,7 @@ st.set_page_config(page_title="Product Count Fetcher", page_icon="📈", layout=
 st.title("🛍️ Product Count Fetcher for Adeptmind API")
 
 st.markdown("""
-Upload a CSV with keywords and fetch product counts from the Adeptmind Search API.
+Upload a CSV with keywords and fetch product counts from the Adeptmind Search API. (there's an change in backend, the kws with PC more than 100 will be shown as 100) will make appropriate changes later.
 """)
 
 # User Config
@@ -23,7 +23,7 @@ shop_id = st.text_input("Enter Shop ID (e.g., 'jacamo')", "jacamo")
 environment = st.radio("Select Environment", ["prod", "staging"])
 
 if environment == "prod":
-    base_url = f"http://dlp-prod-search-api.retail.adeptmind.ai:4000/search?shop_id={shop_id}"
+    base_url = f"https://search-prod-dlp-adept-search.search-prod.adeptmind.app/search?shop_id={shop_id}"
 else:
     base_url = f"https://dlp-staging-search-api.retail.adeptmind.ai/search?shop_id={shop_id}"
 
@@ -65,36 +65,35 @@ headers = {'Content-Type': 'application/json'}
     stop=stop_after_attempt(5),
     retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
 )
-async def search_query_async(row, session, remove_unnecessary_fields=True):
+async def search_query_async(row, session):
     query = row["Keyword"].strip()
+    
+
     data = {
         "query": query,
         "size": 300,
         "include_fields": ["product_id"]
     }
-    if not remove_unnecessary_fields:
-        data.pop("include_fields")
 
     try:
         async with session.post(base_url, headers=headers, data=json.dumps(data)) as response:
             response.raise_for_status()
             response_json = await response.json()
-            prod_ids = [prod["product_id"] for prod in response_json.get("products", [])]
 
-            if prod_ids:
-                return len(prod_ids)
-            elif "timed_out_services" in response_json:
-                raise asyncio.TimeoutError
-            else:
-                if "include_fields" in data:
-                    return await search_query_async(row, session, remove_unnecessary_fields=False)
-                else:
-                    return 0
+            product_count = len(response_json.get("products", []))
+            
+            # This handles the case where the API times out internally
+            if product_count == 0 and "timed_out_services" in response_json:
+                raise asyncio.TimeoutError # This will trigger a retry
+
+            return product_count
+
     except (asyncio.TimeoutError, aiohttp.ClientError):
-        raise
+        raise # Let tenacity handle the retry
     except Exception as e:
         st.error(f"Unexpected error for '{query}': {e}")
-        return -1
+        return -1 # Mark as failed
+
 
 async def wrapper(row, session):
     try:
@@ -128,7 +127,7 @@ async def main_async_fetcher(data_df):
 
         bar.progress(end / total_rows)
         if end < total_rows:
-            sleep_time = random.randint(5, 15)
+            sleep_time = random.randint(1, 5)
             status.info(f"Sleeping {sleep_time}s...")
             time.sleep(sleep_time)
 
