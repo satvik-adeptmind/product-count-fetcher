@@ -68,31 +68,32 @@ headers = {'Content-Type': 'application/json'}
 async def search_query_async(row, session):
     query = row["Keyword"].strip()
     
-
     data = {
         "query": query,
-        "size": 300,
+        "size": 300,  
         "include_fields": ["product_id"]
     }
 
     try:
-        async with session.post(base_url, headers=headers, data=json.dumps(data)) as response:
+        async with session.post(base_url, headers=headers, data=json.dumps(data), timeout=20) as response:
             response.raise_for_status()
             response_json = await response.json()
 
-            product_count = len(response_json.get("products", []))
-            
-            # This handles the case where the API times out internally
-            if product_count == 0 and "timed_out_services" in response_json:
-                raise asyncio.TimeoutError # This will trigger a retry
+            # Read 'doc_num' from the payload for the TRUE total count (e.g., 441).
+            # Do NOT use len(products), which will be capped at 100.
+            payload = response_json.get("payload", {})
+            product_count = payload.get("doc_num", 0)
+
+            if "timed_out_services" in response_json and product_count == 0:
+                raise asyncio.TimeoutError("API internal timeout")
 
             return product_count
 
-    except (asyncio.TimeoutError, aiohttp.ClientError):
-        raise # Let tenacity handle the retry
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        raise 
     except Exception as e:
         st.error(f"Unexpected error for '{query}': {e}")
-        return -1 # Mark as failed
+        return -1
 
 
 async def wrapper(row, session):
@@ -126,10 +127,10 @@ async def main_async_fetcher(data_df):
         all_results.extend(chunk_results)
 
         bar.progress(end / total_rows)
-        if end < total_rows:
-            sleep_time = random.randint(1, 5)
-            status.info(f"Sleeping {sleep_time}s...")
-            time.sleep(sleep_time)
+        #if end < total_rows:
+            #sleep_time = random.randint(1, 5)
+            #status.info(f"Sleeping {sleep_time}s...")
+            #time.sleep(sleep_time)
 
     bar.empty()
     status.empty()
