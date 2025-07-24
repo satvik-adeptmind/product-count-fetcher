@@ -220,10 +220,11 @@ if st.button("🚀 Fetch Product Counts", disabled=(active_df is None)):
                 else:
                     st.dataframe(df_output)
                 
-                # Prepare data for clipboard
-                copy_text = df_output[['Product Count']].to_csv(sep='\t', index=False, header=False)
-                st.code(copy_text, language="")
-                st.info("👆 You can copy the text above (it's formatted for easy pasting into sheets).")
+                # Prepare data for clipboard, but hide it in an expander to avoid a huge scroll area
+                with st.expander("📋 Show Copyable Text for All Results"):
+                    copy_text = df_output[['Product Count']].to_csv(sep='\t', index=False, header=False)
+                    st.code(copy_text, language="")
+                    st.info("👆 You can copy the text above (it's formatted for easy pasting into sheets).")
 
             else: # Display logic for CSV upload
                 st.dataframe(df_output)
