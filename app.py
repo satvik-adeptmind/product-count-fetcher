@@ -116,7 +116,7 @@ environment = st.radio("Select Environment", ["prod", "staging"], index=0)
 if environment == "prod":
     base_url = f"https://search-prod-dlp-adept-search.search-prod.adeptmind.app/search?shop_id={shop_id}"
 else:
-    base_url = f"https://dlp-staging-search-api.retail.adeptmind.ai/search?shop_id={shop_id}"
+    base_url = f"https://search-pre-prod-dlp-adept-search.search-pre-prod.adeptmind.app/search?shop_id={shop_id}"
 
 # Create Tabs
 tab1, tab2 = st.tabs(["📁 Upload CSV", "📋 Paste Keywords"])
