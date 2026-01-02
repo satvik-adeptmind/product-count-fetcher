@@ -8,6 +8,8 @@ import time
 import random
 import nest_asyncio
 import string
+import matplotlib.colors as mcolors
+import re
 
 nest_asyncio.apply()
 
@@ -31,7 +33,7 @@ def is_valid_keyword(keyword: str) -> bool:
 
 def validate_url(url: str) -> tuple[bool, str]:
     """
-    Validates a URL based on specific formatting rules. Now supports international characters.
+    Validates a URL based on specific formatting rules.
     Returns a tuple: (is_valid: bool, reason: str).
     """
     url = url.strip()
@@ -44,15 +46,53 @@ def validate_url(url: str) -> tuple[bool, str]:
     if '--' in url:
         return (False, "Contains consecutive hyphens ('--').")
 
-    # This loop now correctly handles Unicode letters (like á, í, ñ, etc.)
     for char in url:
-        # A character is valid if it's a letter (any language), a digit,
-        # or one of our specifically allowed symbols.
         is_allowed_symbol = char in "-_.:/"
         if not (char.isalpha() or char.isdigit() or is_allowed_symbol):
             return (False, f"Contains invalid character: '{char}'.")
 
     return (True, "Valid")
+
+# --- Color Logic Helper (UPDATED) ---
+@st.cache_resource
+def get_color_regex():
+    """
+    Builds and compiles the regex pattern for color detection based on CSS4 colors
+    and specific fashion additions. Cached to improve performance.
+    """
+    # 1. BUILD THE COLOR LIST DYNAMICALLY
+    base_colors = set(mcolors.CSS4_COLORS.keys())
+    
+    # UPDATED: Comprehensive Fashion/Sneaker Color List
+    fashion_additions = {
+        # Metals & Finishes
+        'volt', 'metallic', 'iridescent', 'neon', 'platinum', 'gold', 'silver', 
+        'bronze', 'copper', 'chrome', 'reflective', 'holographic',
+        
+        # Sneaker/Retail Specifics (The "Missing" ones)
+        'chalk', 'gum', 'bone', 'sand', 'rust', 'clay', 'mint', 'peach', 'nude', 
+        'berry', 'wine', 'mauve', 'lilac', 'mustard', 'olive', 'sage', 'taupe',
+        'camel', 'cognac', 'ochre', 'terracotta', 'burgundy', 'maroon', 'navy',
+        'cream', 'ivory', 'champagne', 'anthracite', 'charcoal', 'graphite',
+        'infrared', 'solar', 'crystal', 'onyx', 'obsidian', 'emerald', 'sapphire',
+        
+        # Compound/Descriptive
+        'multicolor', 'multi-color', 'rainbow', 'tie-dye', 'camo', 'camouflage',
+        'off-white', 'off white', 'rose gold', 'baby blue', 'navy blue'
+    }
+    
+    all_colors = base_colors.union(fashion_additions)
+
+    # 2. CREATE OPTIMIZED REGEX
+    # Sort by length (longest first) to match "navy blue" before "blue"
+    sorted_colors = sorted(list(all_colors), key=len, reverse=True)
+    
+    # Escape special regex characters and join with OR operator |
+    # We use \b to ensure we match "red" but not "scared"
+    pattern_str = r'\b(' + '|'.join(re.escape(c) for c in sorted_colors) + r')\b'
+    
+    # Compile regex
+    return re.compile(pattern_str, re.IGNORECASE)
 
 # --- Core Logic (Async Fetching) ---
 headers = {'Content-Type': 'application/json'}
@@ -117,7 +157,7 @@ async def main_async_fetcher(data_df, base_url):
 
 # --- UI Layout ---
 
-# Configuration Section (moved to sidebar for cleaner look)
+# Configuration Section
 st.sidebar.header("Configuration (Product Counter)")
 shop_id = st.sidebar.text_input("Enter Shop ID", "brooksbrothers")
 environment = st.sidebar.radio("Select Environment", ["prod", "staging"], index=0)
@@ -128,11 +168,12 @@ else:
     base_url = f"https://search-pre-prod-dlp-adept-search.search-pre-prod.adeptmind.app/search?shop_id={shop_id}"
 
 # --- Create Tabs ---
-tab1, tab2, tab_kw_validator, tab_url_validator = st.tabs([
+tab1, tab2, tab_kw_validator, tab_url_validator, tab_color_id = st.tabs([
     "📁 Product Counts (Upload CSV)", 
     "📋 Product Counts (Paste Keywords)", 
     "🔎 Keyword Validator",
-    "🔗 URL Validator"
+    "🔗 URL Validator",
+    "🎨 Color Identifier"
 ])
 
 # --- Tab 1: Upload CSV ---
@@ -247,3 +288,50 @@ with tab_url_validator:
                 st.success("🎉 All URLs are valid!")
         else:
             st.warning("Please paste some URLs to check.")
+
+# --- Color Identifier Tab Logic (Updated) ---
+with tab_color_id:
+    st.header("Color Keyword Identifier")
+    st.markdown("Identifies if a keyword contains a color name (based on CSS4 colors + fashion additions like 'chalk', 'gum', 'bone').")
+    
+    color_input_text = st.text_area("Paste keywords here to identify colors:", height=300, key="color_input", placeholder="blue shirt\nblack pants\nrunning shoes\nmetallic gold bag")
+    
+    if st.button("Identify Colors", key="color_button"):
+        if color_input_text:
+            # 1. Prepare Data
+            keywords_to_check = [kw.strip() for kw in color_input_text.split('\n') if kw.strip()]
+            
+            # 2. Get Regex (Cached)
+            color_regex = get_color_regex()
+            
+            # 3. Process - Filter ONLY matches
+            matched_keywords = [kw for kw in keywords_to_check if color_regex.search(kw)]
+            
+            # 4. Display Results
+            st.subheader("Analysis Results")
+            st.info(f"Total Processed: **{len(keywords_to_check)}** | Color Matches Found: **{len(matched_keywords)}**")
+            
+            if matched_keywords:
+                st.success(f"Found {len(matched_keywords)} keywords containing color terms:")
+                
+                # Create DataFrame for display/download
+                df_matches = pd.DataFrame(matched_keywords, columns=["Color Keywords"])
+                
+                # Show the dataframe
+                st.dataframe(df_matches, use_container_width=True)
+                
+                # Copyable text block
+                
+                # 5. Download
+                csv_color = df_matches.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Download Color Keywords as CSV",
+                    data=csv_color,
+                    file_name="color_keywords_only.csv",
+                    mime="text/csv",
+                    key="download_color_results"
+                )
+            else:
+                st.warning("No color-related keywords found in the provided list.")
+        else:
+            st.warning("Please paste some keywords to identify.")
