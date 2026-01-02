@@ -3,3 +3,4 @@ pandas
 aiohttp
 tenacity
 nest_asyncio
+matplotlib
