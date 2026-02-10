@@ -53,45 +53,30 @@ def validate_url(url: str) -> tuple[bool, str]:
 
     return (True, "Valid")
 
-# --- Color Logic Helper (UPDATED) ---
+# --- Color Logic Helper ---
 @st.cache_resource
 def get_color_regex():
     """
     Builds and compiles the regex pattern for color detection based on CSS4 colors
     and specific fashion additions. Cached to improve performance.
     """
-    # 1. BUILD THE COLOR LIST DYNAMICALLY
     base_colors = set(mcolors.CSS4_COLORS.keys())
     
-    # UPDATED: Comprehensive Fashion/Sneaker Color List
     fashion_additions = {
-        # Metals & Finishes
         'volt', 'metallic', 'iridescent', 'neon', 'platinum', 'gold', 'silver', 
         'bronze', 'copper', 'chrome', 'reflective', 'holographic',
-        
-        # Sneaker/Retail Specifics (The "Missing" ones)
         'chalk', 'gum', 'bone', 'sand', 'rust', 'clay', 'mint', 'peach', 'nude', 
         'berry', 'wine', 'mauve', 'lilac', 'mustard', 'olive', 'sage', 'taupe',
         'camel', 'cognac', 'ochre', 'terracotta', 'burgundy', 'maroon', 'navy',
         'cream', 'ivory', 'champagne', 'anthracite', 'charcoal', 'graphite',
         'infrared', 'solar', 'crystal', 'onyx', 'obsidian', 'emerald', 'sapphire',
-        
-        # Compound/Descriptive
         'multicolor', 'multi-color', 'rainbow', 'tie-dye', 'camo', 'camouflage',
         'off-white', 'off white', 'rose gold', 'baby blue', 'navy blue'
     }
     
     all_colors = base_colors.union(fashion_additions)
-
-    # 2. CREATE OPTIMIZED REGEX
-    # Sort by length (longest first) to match "navy blue" before "blue"
     sorted_colors = sorted(list(all_colors), key=len, reverse=True)
-    
-    # Escape special regex characters and join with OR operator |
-    # We use \b to ensure we match "red" but not "scared"
     pattern_str = r'\b(' + '|'.join(re.escape(c) for c in sorted_colors) + r')\b'
-    
-    # Compile regex
     return re.compile(pattern_str, re.IGNORECASE)
 
 # --- Core Logic (Async Fetching) ---
@@ -102,55 +87,91 @@ headers = {'Content-Type': 'application/json'}
     stop=stop_after_attempt(5),
     retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
 )
-async def search_query_async(row, session, base_url, remove_unnecessary_fields=True):
+async def search_query_async(row, session, base_url, on_sale_mode, remove_unnecessary_fields=True):
     query = row["Keyword"].strip()
     data = {"query": query, "size": 300}
+    
+    # Optimization: Only fetch fields we actually need
     if remove_unnecessary_fields:
-        data["include_fields"] = ["product_id"]
+        if on_sale_mode:
+            # We need the ON_SALE field to check logic
+            data["include_fields"] = ["ON_SALE"]
+        else:
+            # We only need product_id to count existence
+            data["include_fields"] = ["product_id"]
+
     async with session.post(base_url, headers=headers, data=json.dumps(data)) as response:
         response.raise_for_status()
         response_json = await response.json()
         products = response_json.get("products", [])
-        prod_count = len(products)
-        if prod_count > 0:
-            return prod_count
+        
+        # --- Logic Branching ---
+        if not products:
+            return 0
+            
+        if on_sale_mode:
+            # Count only products where ON_SALE is ["TRUE"]
+            on_sale_count = 0
+            for product in products:
+                # Strictly following the provided script logic
+                if product.get("ON_SALE") == ["TRUE"]:
+                    on_sale_count += 1
+            return on_sale_count
+        else:
+            # Standard count (total products returned)
+            return len(products)
+            
+        # Error handling / Fallback for timeout services inside the JSON
         if "timed_out_services" in response_json:
             raise asyncio.TimeoutError("API service timed out internally.")
+            
+        # Recursive retry with full fields if optimization failed inexplicably
         if remove_unnecessary_fields:
-            return await search_query_async(row=row, session=session, base_url=base_url, remove_unnecessary_fields=False)
+            return await search_query_async(row=row, session=session, base_url=base_url, on_sale_mode=on_sale_mode, remove_unnecessary_fields=False)
         return 0
 
-async def wrapper(row, session, base_url):
+async def wrapper(row, session, base_url, on_sale_mode):
     try:
-        return await search_query_async(row, session, base_url)
+        return await search_query_async(row, session, base_url, on_sale_mode)
     except Exception:
         return -1
 
-async def process_data_chunk(data_chunk, base_url):
+async def process_data_chunk(data_chunk, base_url, on_sale_mode):
     async with aiohttp.ClientSession() as session:
-        tasks = [wrapper(row, session, base_url) for _, row in data_chunk.iterrows()]
+        tasks = [wrapper(row, session, base_url, on_sale_mode) for _, row in data_chunk.iterrows()]
         return await asyncio.gather(*tasks)
 
-async def main_async_fetcher(data_df, base_url):
-    chunk_size = 1000
+async def main_async_fetcher(data_df, base_url, on_sale_mode):
+    # Adjust batch size based on requirements
+    chunk_size = 500 if on_sale_mode else 1000
+    
     total_rows = len(data_df)
     all_results = []
-    st.subheader("Fetching Product Counts...")
+    
+    mode_text = "ON SALE" if on_sale_mode else "STANDARD"
+    st.subheader(f"Fetching Product Counts ({mode_text} Mode)...")
+    
     bar = st.progress(0, text="Initializing...")
     status = st.empty()
+    
     for i, start in enumerate(range(0, total_rows, chunk_size)):
         end = min(start + chunk_size, total_rows)
         chunk = data_df.iloc[start:end]
+        
         status_text = f"Processing chunk {i+1} of {-(total_rows // -chunk_size)} (rows {start+1}-{end})..."
         status.text(status_text)
         bar.progress(start / total_rows, text=status_text)
-        chunk_results = await process_data_chunk(chunk, base_url)
+        
+        chunk_results = await process_data_chunk(chunk, base_url, on_sale_mode)
         all_results.extend(chunk_results)
+        
         bar.progress(end / total_rows, text=status_text)
+        
         if end < total_rows:
             sleep_time = random.randint(5, 15)
             status.info(f"Chunk processed. Sleeping for {sleep_time} seconds...")
             time.sleep(sleep_time)
+            
     bar.empty()
     status.empty()
     return all_results
@@ -161,6 +182,9 @@ async def main_async_fetcher(data_df, base_url):
 st.sidebar.header("Configuration (Product Counter)")
 shop_id = st.sidebar.text_input("Enter Shop ID", "brooksbrothers")
 environment = st.sidebar.radio("Select Environment", ["prod", "staging"], index=0)
+
+# Toggle for On Sale Logic
+on_sale_mode = st.sidebar.toggle("Count 'On Sale' Only", value=False, help="If enabled, counts only products where ON_SALE=['TRUE'].")
 
 if environment == "prod":
     base_url = f"https://search-prod-dlp-adept-search.search-prod.adeptmind.app/search?shop_id={shop_id}"
@@ -220,14 +244,38 @@ elif st.session_state.df_from_paste is not None: active_df = st.session_state.df
 if st.button("🚀 Fetch Product Counts", disabled=(active_df is None)):
     if active_df is not None:
         with st.spinner("Fetching counts..."):
-            results = asyncio.run(main_async_fetcher(active_df, base_url))
-            active_df['Product Count'] = results; st.success("✅ Processing Complete!")
-            df_output = pd.DataFrame({'Serial Number': range(1, 1 + len(active_df)), 'Keyword': active_df['Keyword'], 'Product Count': active_df['Product Count']})
+            # Pass on_sale_mode to main fetcher
+            results = asyncio.run(main_async_fetcher(active_df, base_url, on_sale_mode))
+            
+            # Determine column name based on mode
+            col_name = 'On Sale Count' if on_sale_mode else 'Product Count'
+            
+            active_df[col_name] = results
+            st.success("✅ Processing Complete!")
+            
+            df_output = pd.DataFrame({
+                'Serial Number': range(1, 1 + len(active_df)), 
+                'Keyword': active_df['Keyword'], 
+                col_name: active_df[col_name]
+            })
+            
             st.subheader("Results")
-            if (df_output['Product Count'] == -1).sum() > 0: st.warning(f"Failed keywords: {(df_output['Product Count'] == -1).sum()} (marked as -1).")
+            if (df_output[col_name] == -1).sum() > 0: 
+                st.warning(f"Failed keywords: {(df_output[col_name] == -1).sum()} (marked as -1).")
+            
             st.dataframe(df_output)
+            
+            file_prefix = f"{shop_id}_{environment}"
+            file_suffix = "onsale_counts" if on_sale_mode else "product_counts"
+            
             csv_data = df_output.to_csv(index=False).encode('utf-8')
-            st.download_button(label="📥 Download Full Results as CSV", data=csv_data, file_name=f"{shop_id}_{environment}_product_counts.csv", mime="text/csv", key=f"{source}_download")
+            st.download_button(
+                label="📥 Download Full Results as CSV", 
+                data=csv_data, 
+                file_name=f"{file_prefix}_{file_suffix}.csv", 
+                mime="text/csv", 
+                key=f"{source}_download"
+            )
     else: st.error("Please provide keywords.")
 
 # --- Keyword Validator Tab Logic ---
@@ -289,7 +337,7 @@ with tab_url_validator:
         else:
             st.warning("Please paste some URLs to check.")
 
-# --- Color Identifier Tab Logic (Updated) ---
+# --- Color Identifier Tab Logic ---
 with tab_color_id:
     st.header("Color Keyword Identifier")
     st.markdown("Identifies if a keyword contains a color name (based on CSS4 colors + fashion additions like 'chalk', 'gum', 'bone').")
@@ -298,31 +346,17 @@ with tab_color_id:
     
     if st.button("Identify Colors", key="color_button"):
         if color_input_text:
-            # 1. Prepare Data
             keywords_to_check = [kw.strip() for kw in color_input_text.split('\n') if kw.strip()]
-            
-            # 2. Get Regex (Cached)
             color_regex = get_color_regex()
-            
-            # 3. Process - Filter ONLY matches
             matched_keywords = [kw for kw in keywords_to_check if color_regex.search(kw)]
             
-            # 4. Display Results
             st.subheader("Analysis Results")
             st.info(f"Total Processed: **{len(keywords_to_check)}** | Color Matches Found: **{len(matched_keywords)}**")
             
             if matched_keywords:
                 st.success(f"Found {len(matched_keywords)} keywords containing color terms:")
-                
-                # Create DataFrame for display/download
                 df_matches = pd.DataFrame(matched_keywords, columns=["Color Keywords"])
-                
-                # Show the dataframe
                 st.dataframe(df_matches, use_container_width=True)
-                
-                # Copyable text block
-                
-                # 5. Download
                 csv_color = df_matches.to_csv(index=False).encode('utf-8')
                 st.download_button(
                     label="📥 Download Color Keywords as CSV",
