@@ -91,13 +91,11 @@ async def search_query_async(row, session, base_url, on_sale_mode, remove_unnece
     query = row["Keyword"].strip()
     data = {"query": query, "size": 300}
     
-    # Optimization: Only fetch fields we actually need
+    # 1. Prepare Fields based on mode
     if remove_unnecessary_fields:
         if on_sale_mode:
-            # We need the ON_SALE field to check logic
             data["include_fields"] = ["ON_SALE"]
         else:
-            # We only need product_id to count existence
             data["include_fields"] = ["product_id"]
 
     async with session.post(base_url, headers=headers, data=json.dumps(data)) as response:
@@ -105,29 +103,30 @@ async def search_query_async(row, session, base_url, on_sale_mode, remove_unnece
         response_json = await response.json()
         products = response_json.get("products", [])
         
-        # --- Logic Branching ---
-        if not products:
-            return 0
+        # 2. Calculate Count based on mode
+        count = 0
+        if products:
+            if on_sale_mode:
+                for product in products:
+                    if product.get("ON_SALE") == ["TRUE"]:
+                        count += 1
+            else:
+                count = len(products)
+        
+        # 3. Success check (Early Exit for Success Only)
+        if count > 0:
+            return count
             
-        if on_sale_mode:
-            # Count only products where ON_SALE is ["TRUE"]
-            on_sale_count = 0
-            for product in products:
-                # Strictly following the provided script logic
-                if product.get("ON_SALE") == ["TRUE"]:
-                    on_sale_count += 1
-            return on_sale_count
-        else:
-            # Standard count (total products returned)
-            return len(products)
-            
-        # Error handling / Fallback for timeout services inside the JSON
+        # 4. Error Handling
         if "timed_out_services" in response_json:
             raise asyncio.TimeoutError("API service timed out internally.")
             
-        # Recursive retry with full fields if optimization failed inexplicably
+        # 5. RETRY LOGIC : 
+        # If count is 0 and we were optimized, try again without optimization
         if remove_unnecessary_fields:
             return await search_query_async(row=row, session=session, base_url=base_url, on_sale_mode=on_sale_mode, remove_unnecessary_fields=False)
+            
+        # 6. If we are here, it's truly 0
         return 0
 
 async def wrapper(row, session, base_url, on_sale_mode):
@@ -142,14 +141,12 @@ async def process_data_chunk(data_chunk, base_url, on_sale_mode):
         return await asyncio.gather(*tasks)
 
 async def main_async_fetcher(data_df, base_url, on_sale_mode):
-    # Adjust batch size based on requirements
-    chunk_size = 500 if on_sale_mode else 1000
-    
+    chunk_size = 1000 # Keeping original batch size
     total_rows = len(data_df)
     all_results = []
     
-    mode_text = "ON SALE" if on_sale_mode else "STANDARD"
-    st.subheader(f"Fetching Product Counts ({mode_text} Mode)...")
+    mode_label = "ON SALE" if on_sale_mode else "STANDARD"
+    st.subheader(f"Fetching Product Counts ({mode_label} Mode)...")
     
     bar = st.progress(0, text="Initializing...")
     status = st.empty()
@@ -162,6 +159,7 @@ async def main_async_fetcher(data_df, base_url, on_sale_mode):
         status.text(status_text)
         bar.progress(start / total_rows, text=status_text)
         
+        # Pass on_sale_mode down
         chunk_results = await process_data_chunk(chunk, base_url, on_sale_mode)
         all_results.extend(chunk_results)
         
@@ -244,15 +242,16 @@ elif st.session_state.df_from_paste is not None: active_df = st.session_state.df
 if st.button("🚀 Fetch Product Counts", disabled=(active_df is None)):
     if active_df is not None:
         with st.spinner("Fetching counts..."):
-            # Pass on_sale_mode to main fetcher
+            # Execute async fetcher with on_sale_mode
             results = asyncio.run(main_async_fetcher(active_df, base_url, on_sale_mode))
             
-            # Determine column name based on mode
+            # Dynamic Column Name
             col_name = 'On Sale Count' if on_sale_mode else 'Product Count'
-            
             active_df[col_name] = results
+            
             st.success("✅ Processing Complete!")
             
+            # Output DataFrame
             df_output = pd.DataFrame({
                 'Serial Number': range(1, 1 + len(active_df)), 
                 'Keyword': active_df['Keyword'], 
@@ -265,6 +264,7 @@ if st.button("🚀 Fetch Product Counts", disabled=(active_df is None)):
             
             st.dataframe(df_output)
             
+            # Dynamic Filename
             file_prefix = f"{shop_id}_{environment}"
             file_suffix = "onsale_counts" if on_sale_mode else "product_counts"
             
