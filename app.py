@@ -82,8 +82,9 @@ def get_color_regex():
 # --- Core Logic (Async Fetching) ---
 headers = {'Content-Type': 'application/json'}
 
+# RETRY SETTINGS: Min 2s, Max 60s (Stability for tough retailers)
 @retry(
-    wait=wait_random_exponential(min=1, max=10),
+    wait=wait_random_exponential(min=2, max=60),
     stop=stop_after_attempt(5),
     retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
 )
@@ -91,42 +92,43 @@ async def search_query_async(row, session, base_url, on_sale_mode, remove_unnece
     query = row["Keyword"].strip()
     data = {"query": query, "size": 300}
     
-    # 1. Prepare Fields based on mode
+    # Logic: "Early Exit" Optimization
     if remove_unnecessary_fields:
         if on_sale_mode:
             data["include_fields"] = ["ON_SALE"]
         else:
             data["include_fields"] = ["product_id"]
 
-    async with session.post(base_url, headers=headers, data=json.dumps(data)) as response:
+    # TIMEOUT: Explicit 30s timeout
+    timeout = aiohttp.ClientTimeout(total=30)
+    
+    async with session.post(base_url, headers=headers, data=json.dumps(data), timeout=timeout) as response:
         response.raise_for_status()
         response_json = await response.json()
         products = response_json.get("products", [])
         
-        # 2. Calculate Count based on mode
         count = 0
         if products:
             if on_sale_mode:
+                # Logic: Strictly check for ON_SALE == ["TRUE"]
                 for product in products:
                     if product.get("ON_SALE") == ["TRUE"]:
                         count += 1
             else:
                 count = len(products)
         
-        # 3. Success check (Early Exit for Success Only)
+        # Logic: If we found data, return immediately (Success)
         if count > 0:
             return count
             
-        # 4. Error Handling
         if "timed_out_services" in response_json:
             raise asyncio.TimeoutError("API service timed out internally.")
             
-        # 5. RETRY LOGIC : 
-        # If count is 0 and we were optimized, try again without optimization
+        # Logic: Recursive Retry
+        # If result is 0 and we were optimized, try again WITHOUT optimization
         if remove_unnecessary_fields:
             return await search_query_async(row=row, session=session, base_url=base_url, on_sale_mode=on_sale_mode, remove_unnecessary_fields=False)
             
-        # 6. If we are here, it's truly 0
         return 0
 
 async def wrapper(row, session, base_url, on_sale_mode):
@@ -141,12 +143,15 @@ async def process_data_chunk(data_chunk, base_url, on_sale_mode):
         return await asyncio.gather(*tasks)
 
 async def main_async_fetcher(data_df, base_url, on_sale_mode):
-    chunk_size = 1000 # Keeping original batch size
+    # BATCH SIZE: On Sale = 500, Standard = 1000
+    chunk_size = 500 if on_sale_mode else 1000
+    
     total_rows = len(data_df)
     all_results = []
     
     mode_label = "ON SALE" if on_sale_mode else "STANDARD"
     st.subheader(f"Fetching Product Counts ({mode_label} Mode)...")
+    st.markdown(f"**Settings:** Batch Size: `{chunk_size}`, Timeout: `30s`, Max Retries: `5`")
     
     bar = st.progress(0, text="Initializing...")
     status = st.empty()
@@ -159,13 +164,13 @@ async def main_async_fetcher(data_df, base_url, on_sale_mode):
         status.text(status_text)
         bar.progress(start / total_rows, text=status_text)
         
-        # Pass on_sale_mode down
         chunk_results = await process_data_chunk(chunk, base_url, on_sale_mode)
         all_results.extend(chunk_results)
         
         bar.progress(end / total_rows, text=status_text)
         
         if end < total_rows:
+            # SLEEP: Random 5-15 seconds for BOTH modes
             sleep_time = random.randint(5, 15)
             status.info(f"Chunk processed. Sleeping for {sleep_time} seconds...")
             time.sleep(sleep_time)
@@ -182,7 +187,7 @@ shop_id = st.sidebar.text_input("Enter Shop ID", "brooksbrothers")
 environment = st.sidebar.radio("Select Environment", ["prod", "staging"], index=0)
 
 # Toggle for On Sale Logic
-on_sale_mode = st.sidebar.toggle("Count 'On Sale' Only", value=False, help="If enabled, counts only products where ON_SALE=['TRUE'].")
+on_sale_mode = st.sidebar.toggle("Count 'On Sale' Only", value=False, help="If enabled, counts only products where ON_SALE=['TRUE']. Batch size reduces to 500.")
 
 if environment == "prod":
     base_url = f"https://search-prod-dlp-adept-search.search-prod.adeptmind.app/search?shop_id={shop_id}"
@@ -242,16 +247,13 @@ elif st.session_state.df_from_paste is not None: active_df = st.session_state.df
 if st.button("🚀 Fetch Product Counts", disabled=(active_df is None)):
     if active_df is not None:
         with st.spinner("Fetching counts..."):
-            # Execute async fetcher with on_sale_mode
             results = asyncio.run(main_async_fetcher(active_df, base_url, on_sale_mode))
             
-            # Dynamic Column Name
             col_name = 'On Sale Count' if on_sale_mode else 'Product Count'
             active_df[col_name] = results
             
             st.success("✅ Processing Complete!")
             
-            # Output DataFrame
             df_output = pd.DataFrame({
                 'Serial Number': range(1, 1 + len(active_df)), 
                 'Keyword': active_df['Keyword'], 
@@ -264,7 +266,6 @@ if st.button("🚀 Fetch Product Counts", disabled=(active_df is None)):
             
             st.dataframe(df_output)
             
-            # Dynamic Filename
             file_prefix = f"{shop_id}_{environment}"
             file_suffix = "onsale_counts" if on_sale_mode else "product_counts"
             
